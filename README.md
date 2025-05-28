@@ -366,3 +366,198 @@ main().catch((err) => {
   process.exit(1);
 });
 ```
+### 7) ✅ Claim + Permit + Send (main1.js)
+```
+require("dotenv").config();
+const readline = require("readline"); // [ADDED]
+const hre = require("hardhat");
+const { ethers } = hre;
+
+const permitAndTransferIface = new ethers.Interface([
+  "function permitAndTransfer(address token,address owner,address to,uint256 amount,uint256 deadline,uint8 v,bytes32 r,bytes32 s)"
+]);
+
+async function askUserToConfirm(question) {
+  // [ADDED] Ask for user input in CLI
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "yes");
+    });
+  });
+}
+
+async function main() {
+  const provider = ethers.provider;
+  const safeWallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+  const compromisedPK = "COMPROMISED_WALLET_KEY";
+  const compromisedWallet = new ethers.Wallet(compromisedPK, provider);
+
+  const [compromisedAddress, feeData, network, latestBlock] = await Promise.all([
+    compromisedWallet.getAddress(),
+    provider.getFeeData(),
+    provider.getNetwork(),
+    provider.getBlock("latest")
+  ]);
+
+  const nonce = await provider.getTransactionCount(compromisedWallet.address, latestBlock.number);
+  const chainId = network.chainId;
+  const safeAddress = "0x0E1730aAb680245971603F9EDEAa0C85EBeaaaaa";
+  const airdropContractAddress = "0xa25Ca9Af02BD84EEB3F030260D831a0bB1791D59";
+  const airdropTokenAddress = "0x7A96858d1118157D2c59615193e8E872707A4A79";
+  const permitAndTransferAddress = "0xa5254BcbEDFA5790370F728EFD8c68D6E85B3f5e";
+  const tokenName = "HACKER FUCK YOU";
+  const balance = ethers.parseUnits("1", 18);
+
+  const maxFeePerGas = feeData.maxFeePerGas + ethers.parseUnits("10", "gwei");
+  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas + ethers.parseUnits("5", "gwei");
+
+  // const maxFeePerGas = feeData.maxFeePerGas * 3n;
+  // const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas * 2n;
+
+  const tokenNonceData = await provider.send("eth_call", [
+    {
+      to: airdropTokenAddress,
+      data: "0x7ecebe00" + compromisedAddress.slice(2).padStart(64, "0"),
+    },
+    `0x${latestBlock.number.toString(16)}`
+  ]);
+  const tokenNonce = ethers.toBigInt(tokenNonceData);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+  const domain = {
+    name: tokenName,
+    version: "1",
+    chainId,
+    verifyingContract: airdropTokenAddress,
+  };
+  const types = {
+    Permit: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+  const message = {
+    owner: compromisedAddress,
+    spender: permitAndTransferAddress,
+    value: balance,
+    nonce: tokenNonce,
+    deadline,
+  };
+
+  const sig = await compromisedWallet.signTypedData(domain, types, message);
+  const { v, r, s } = ethers.Signature.from(sig);
+
+  const permitAndTransferData = permitAndTransferIface.encodeFunctionData("permitAndTransfer", [
+    airdropTokenAddress,
+    compromisedAddress,
+    safeAddress,
+    balance,
+    deadline,
+    v,
+    r,
+    s,
+  ]);
+
+  const claimTx = {
+    to: airdropContractAddress,
+    data: "0x4e71d92d",
+    gasLimit: 150000n,
+    nonce,
+    chainId,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  };
+
+  const permitAndTransferTx = {
+    to: permitAndTransferAddress,
+    data: permitAndTransferData,
+    gasLimit: 200000n,
+    nonce: nonce + 1,
+    chainId,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  };
+
+  // [ADDED] Estimate total gas cost
+  const totalGasLimit = claimTx.gasLimit + permitAndTransferTx.gasLimit;
+  const estimatedGasCost = totalGasLimit * maxFeePerGas;
+
+  console.log("💸 Estimated Total Gas Cost for both txs:");
+  console.log(`   Gas Used: ${totalGasLimit.toString()} units`);
+  console.log(`   Max Fee per Gas: ${ethers.formatUnits(maxFeePerGas, "gwei")} gwei`);
+  console.log(`   Total ETH Needed: ${ethers.formatEther(estimatedGasCost)} ETH`);
+
+  const confirm = await askUserToConfirm("🛠️  Are you funding this gas amount in the contract? Type 'yes' to proceed: "); 
+  if (!confirm) {
+    console.log("❌ Aborted by user.");
+    return;
+  }
+
+  const [signedClaim, signedPermitAndTransfer] = await Promise.all([
+    compromisedWallet.signTransaction(claimTx),
+    compromisedWallet.signTransaction(permitAndTransferTx),
+  ]);
+  console.log("✅ Transactions pre-signed!");
+
+  const rawTxs = [signedClaim, signedPermitAndTransfer];
+
+  let iteration = 0;
+  const BATCH_SIZE = 100;
+  const NUM_WORKERS = 10;
+
+  const spamWorker = async (workerId) => {
+    while (true) {
+      const batch = Array(BATCH_SIZE).fill(null).map(() =>
+        rawTxs.map(raw => provider.send("eth_sendRawTransaction", [raw]))
+      ).flat();
+
+      try {
+        await Promise.allSettled(batch);
+        iteration++;
+        if (iteration % 20 === 0) {
+          console.log(`💀 Worker ${workerId}: Batch #${iteration} (${BATCH_SIZE * 2} txs fired)`);
+        }
+      } catch {}
+    }
+  };
+
+  const workers = Array(NUM_WORKERS).fill(null).map((_, i) => spamWorker(i));
+  Promise.all(workers);
+
+  console.log("🚀 Spamming started...");
+
+  setTimeout(() => {
+    (async () => {
+      try {
+        const A = await ethers.getContractFactory("A", safeWallet);
+        const contract = await A.deploy(compromisedAddress, {
+          value: ethers.parseEther("0.002"), // GAS U NEED TO SEND
+          maxFeePerGas,
+          maxPriorityFeePerGas,
+        });
+        console.log(`🏗️  Contract deployed: ${contract.deploymentTransaction().hash}`);
+        console.log("💰 Wallet should be funded now - spam continues!");
+      } catch (err) {
+        console.error("❌ Deploy failed:", err.message);
+      }
+    })();
+  }, 6000);
+
+  setInterval(() => {
+    console.log(`🔥 RACE IN PROGRESS - ${NUM_WORKERS} workers running, ${iteration} total batches`);
+  }, 2000);
+}
+
+main().catch((err) => {
+  console.error("❌ Script failed:", err);
+  process.exit(1);
+});
+```
