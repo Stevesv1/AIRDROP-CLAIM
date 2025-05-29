@@ -593,28 +593,26 @@ async function main() {
   const tokenAddress = process.env.TOKEN_ADDRESS;
   const airdropContractAddress = process.env.AIRDROP_CONTRACT;
   const recoverContractAddress = process.env.RECOVER_CONTRACT;
-  const hardcodedTokenAmount = process.env.TOKEN_AMOUNT || "1";
-
-  // Check initial balances
+  const hardcodedTokenAmount = process.env.TOKEN_AMOUNT;
   const compromisedBalance = await provider.getBalance(compromisedAddress);
   const safeBalance = await provider.getBalance(safeAddress);
 
   console.log(`💰 Compromised wallet ETH: ${ethers.formatEther(compromisedBalance)} ETH`);
   console.log(`💰 Safe wallet ETH: ${ethers.formatEther(safeBalance)} ETH`);
 
-  // Manual gas limits
-  const CLAIM_GAS_LIMIT = BigInt(100000);
+  // == Use Correct Gas Limit Here ==
+  const CLAIM_GAS_LIMIT = BigInt(100000); // Use correct gas limit for claim
   const RECOVER_GAS_LIMIT = BigInt(100000);
-  const FUNDING_GAS_LIMIT = BigInt(200000); // Adjusted for contract deployment
+  const FUNDING_GAS_LIMIT = BigInt(200000); 
 
-  // Gas fee configuration (aligned to high values to outpace hacker)
-  const GAS_MAX_FEE_PER_GAS = ethers.parseUnits("3", "gwei");
-  const GAS_MAX_PRIORITY_FEE = ethers.parseUnits("2", "gwei");
+  // == Use High Gas Fee ==
+  const GAS_MAX_FEE_PER_GAS = ethers.parseUnits("55", "gwei"); // this gas price must be more than or equal to the below one (priority fee)
+  const GAS_MAX_PRIORITY_FEE = ethers.parseUnits("50", "gwei");
 
-  // Calculate funding and recover costs
+
   const claimGasCost = CLAIM_GAS_LIMIT * GAS_MAX_FEE_PER_GAS;
   const recoverGasCost = RECOVER_GAS_LIMIT * GAS_MAX_FEE_PER_GAS;
-  const fundingAmount = claimGasCost + ethers.parseEther("0.0002"); // Extra buffer
+  const fundingAmount = claimGasCost + ethers.parseEther("0.0002");
   const totalSafeWalletCost = fundingAmount + recoverGasCost;
 
   console.log(`\n⛽️ Gas Fee Configuration:`);
@@ -624,31 +622,22 @@ async function main() {
   console.log(`💸 Funding amount (with buffer): ${ethers.formatEther(fundingAmount)} ETH`);
   console.log(`💸 Total safe wallet cost (funding + recover): ${ethers.formatEther(totalSafeWalletCost)} ETH`);
 
-  // Check safe wallet balance
   if (safeBalance < totalSafeWalletCost) {
     console.error(`❌ Insufficient balance in safe wallet: ${ethers.formatEther(safeBalance)} ETH available, need ${ethers.formatEther(totalSafeWalletCost)} ETH`);
     process.exit(1);
   }
-
-  // Get chain ID
   const chainId = (await provider.getNetwork()).chainId;
-
-  // Get initial nonces
   const compromisedNonce = await provider.getTransactionCount(compromisedAddress, "pending");
   let safeNonce = await provider.getTransactionCount(safeAddress, "pending");
 
   console.log(`📊 Initial nonces - Compromised: ${compromisedNonce}, Safe: ${safeNonce}`);
-
-  // === PRE-SIGN ALL TRANSACTIONS ===
   console.log("\n🛠️ Pre-signing all transactions...");
-
-  // Prepare and sign funding transaction
   const Funder = await ethers.getContractFactory("A", safeWallet);
   const fundingTxData = await Funder.getDeployTransaction(compromisedAddress, {
     value: fundingAmount,
   });
   const fundingTx = {
-    to: null, // Will be set by deployment
+    to: null,
     data: fundingTxData.data,
     value: fundingAmount,
     gasLimit: FUNDING_GAS_LIMIT,
@@ -660,7 +649,6 @@ async function main() {
   };
   const signedFundingTx = await safeWallet.signTransaction(fundingTx);
 
-  // Prepare and sign claim transaction
   const claimTx = {
     to: airdropContractAddress,
     data: "0x4e71d92d", // claim() function selector
@@ -672,8 +660,6 @@ async function main() {
     type: 2,
   };
   const signedClaimTx = await compromisedWallet.signTransaction(claimTx);
-
-  // Prepare and sign multiple recovery transactions
   const tokenAbi = ["function decimals() view returns (uint8)"];
   const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
   const decimals = await tokenContract.decimals();
@@ -688,7 +674,6 @@ async function main() {
     tokenAmountToRecover,
   ]);
 
-  // Pre-sign recover transactions for nonces safeNonce + 1 and safeNonce + 2
   const signedRecoverTxs = [];
   for (let i = 1; i <= 2; i++) {
     const recoverTx = {
@@ -706,17 +691,14 @@ async function main() {
   }
 
   console.log("✅ All transactions pre-signed!");
-  console.log(`🎯 Funding will use nonce: ${safeNonce}`);
-  console.log(`🎯 Claim will use nonce: ${compromisedNonce}`);
-  console.log(`🔄 Recovery will use nonces: ${signedRecoverTxs.map(tx => tx.nonce).join(", ")}`);
   console.log(`🪙 Token amount to recover: ${ethers.formatUnits(tokenAmountToRecover, decimals)} tokens`);
 
-  // === RELENTLESS TRANSACTION SENDING IN SEQUENCE ===
+
   console.log("\n🚀 Starting relentless transaction sending (funding → claim → recover)...");
   let fundingSent = false;
   let claimSent = false;
   let recoverSent = false;
-  let recoverAttemptIndex = 0; // Track which recover transaction to try
+  let recoverAttemptIndex = 0;
 
   while (!fundingSent || !claimSent || !recoverSent) {
     // Step 1: Send funding transaction until accepted
@@ -738,15 +720,11 @@ async function main() {
       if (recoverResult) {
         recoverSent = true;
       } else {
-        // Try next recover transaction if current one fails
         recoverAttemptIndex++;
       }
     }
-
-    // No delay; loop immediately
   }
 
-  // Final status
   console.log("\n🎉 Success! All transactions were sent successfully:");
   if (fundingSent) console.log("   ✅ Funding transaction succeeded.");
   if (claimSent) console.log("   ✅ Claim transaction succeeded.");
